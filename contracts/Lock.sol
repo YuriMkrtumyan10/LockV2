@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.9;
+pragma solidity 0.8.9;
 
 // Import this file to use console.log
 import "hardhat/console.sol";
@@ -38,9 +38,15 @@ contract Lock is Ownable {
     uint256 public usersNumber;
     TokenA public tokenA;
     TokenB public tokenB;
+    uint256 public ownerProfitEth;
+    uint256[] public ownerProfitToken;
     uint256 public id;
 
     mapping(address => mapping(uint256 => User)) public locks;
+
+    event Locked(uint256 _id, address indexed _user, uint256 _lockTime);
+    event UnLocked(uint256 _id, address indexed _user, uint256 _unlockTime);
+    event Withdrawal(uint _amount, uint _when);
 
     constructor(uint256 _ownerFee) payable {
         ownerFee = _ownerFee;
@@ -48,21 +54,23 @@ contract Lock is Ownable {
         tokenB = new TokenB();
     }
 
-    event Locked(uint256 _id, address indexed _user, uint256 _lockTime);
-    event UnLocked(uint256 _id, address indexed _user, uint256 _unlockTime);
-    event Withdrawal(uint _amount, uint _when);
-
     function checkTokensWithTokenAMount(
         uint256[] memory _tokenAmount,
         address[] memory _tokenAddress
     ) public view returns (bool) {
-        if (_tokenAddress.length != _tokenAmount.length) {
-            return false;
-        }
+        bool res = false;
+        require(
+            _tokenAddress.length == _tokenAmount.length,
+            "Lock: Invalid input for token"
+        );
+
         if (_tokenAddress.length == 0) {
             return false;
         } else {
-            for (uint i = 0; i < _tokenAddress.length; i++) {
+            for (uint256 i = 0; i < _tokenAddress.length; i++) {
+                if (_tokenAmount[i] != 0) {
+                    res = true;
+                }
                 require(
                     address(IERC20(_tokenAddress[i])) != address(0x0),
                     "Lock: You have 0x0 address"
@@ -81,7 +89,7 @@ contract Lock is Ownable {
                 );
             }
         }
-        return true;
+        return res;
     }
 
     function lock(
@@ -91,24 +99,22 @@ contract Lock is Ownable {
     ) external payable {
         require(
             msg.value > 0 ||
-                !checkTokensWithTokenAMount(_tokenAmount, _tokenAddress),
-            "Lock: submit 0 token or ether"
+                checkTokensWithTokenAMount(_tokenAmount, _tokenAddress),
+            "Lock: submited 0 token or ether"
         );
-        if (!checkTokensWithTokenAMount(_tokenAmount, _tokenAddress)) {
-            require(msg.value > 0, "Lock: Submit ether");
-            require(msg.sender.balance >= msg.value, "Lock: Not enough Eth");
-            payable(address(this)).transfer(msg.value);
-        } else {
+        if (checkTokensWithTokenAMount(_tokenAmount, _tokenAddress)) {
             for (uint i = 0; i < _tokenAddress.length; i++) {
                 if (msg.value > 0 && _tokenAmount[i] >= 0) {
-                    payable(address(this)).transfer(msg.value);
-
                     IERC20(_tokenAddress[i]).transferFrom(
                         msg.sender,
                         address(this),
                         _tokenAmount[i]
                     );
+                    //ownerProfitToken[i] = (_tokenAmount[i] * ownerFee) / 100;
+                    ownerProfitEth = (msg.value * ownerFee) / 100;
                 } else {
+                    //  ownerProfitToken[i] = (_tokenAmount[i] * ownerFee) / 100;
+
                     IERC20(_tokenAddress[i]).transferFrom(
                         msg.sender,
                         address(this),
@@ -116,6 +122,9 @@ contract Lock is Ownable {
                     );
                 }
             }
+        } else {
+            require(msg.sender.balance >= msg.value, "Lock: Not enough Eth");
+            ownerProfitEth = (msg.value * ownerFee) / 100;
         }
 
         usersNumber++;
@@ -133,59 +142,68 @@ contract Lock is Ownable {
     }
 
     function unlock(uint256 _id) external payable {
+        require(locks[msg.sender][_id].id > 0, "Lock: You are not allowed");
         require(
-            locks[msg.sender][_id].id > 0,
+            locks[msg.sender][_id].status == Status.LOCK,
             "Lock: Should have been locked to unlock"
         );
+        require(
+            block.timestamp >= locks[msg.sender][_id].unlockTime,
+            "Lock: You have to wait"
+        );
 
-        // require(
-        //     block.timestamp >= locks[msg.sender].unlockTime,
-        //     "Lock: You have to wait"
-        // );
-        if (locks[msg.sender][_id].tokenAddress[0] == address(0x0)) {
-            payable(msg.sender).transfer(
-                locks[msg.sender][usersNumber].amountEth -
-                    (locks[msg.sender][usersNumber].amountEth * ownerFee) /
-                    100
-            );
+        if (locks[msg.sender][_id].amountEth > 0) {
+            uint256 transferEthAmount = locks[msg.sender][_id].amountEth;
+            locks[msg.sender][_id].amountEth = 0;
+            locks[msg.sender][_id].status = Status.UNLOCK;
+            payable(msg.sender).transfer(transferEthAmount - ownerProfitEth);
         }
         for (uint i = 0; i < locks[msg.sender][_id].tokenAddress.length; i++) {
-            if (locks[msg.sender][usersNumber].amountToken[i] > 0) {
-                IERC20(locks[msg.sender][id].tokenAddress[i]).transferFrom(
-                    address(this),
+            if (locks[msg.sender][_id].amountToken[i] >= 0) {
+                uint256 transferTokenAmount = locks[msg.sender][_id]
+                    .amountToken[i];
+                locks[msg.sender][_id].amountToken[i] = 0;
+                locks[msg.sender][_id].status = Status.UNLOCK;
+
+                // ask who is the FROM field below
+                IERC20(locks[msg.sender][_id].tokenAddress[i]).transfer(
                     msg.sender,
-                    locks[msg.sender][usersNumber].amountToken[i] -
-                        (locks[msg.sender][usersNumber].amountToken[i] *
-                            ownerFee) /
-                        100
+                    transferTokenAmount - (transferTokenAmount * ownerFee) / 100
                 );
-            } else {
-                payable(msg.sender).transfer(
-                    locks[msg.sender][usersNumber].amountEth -
-                        (locks[msg.sender][usersNumber].amountEth * ownerFee) /
-                        100
-                );
-                IERC20(locks[msg.sender][_id].tokenAddress[i]).transferFrom(
-                    address(this),
-                    msg.sender,
-                    locks[msg.sender][usersNumber].amountToken[i] -
-                        (locks[msg.sender][usersNumber].amountToken[i] *
-                            ownerFee) /
-                        100
-                );
+                locks[msg.sender][_id].tokenAddress[i] = address(0);
             }
         }
 
-        //block.timestamp changeed to 10 to check the test
-        emit UnLocked(usersNumber, msg.sender, 10);
+        emit UnLocked(usersNumber, msg.sender, block.timestamp);
     }
 
-    function withdraw() public payable onlyOwner {
-        require(address(this).balance > 0, "You can't withdraw yet");
+    function withdraw(
+        uint256 _amountEth,
+        uint256[] memory _amountToken,
+        address[] memory _tokenAddress
+    ) public payable onlyOwner {
+        require(address(this).balance >= _amountEth, "Not enought ether");
+        require(_amountEth <= ownerProfitEth, "Too much ether withdrawal");
 
-        payable(owner()).transfer(address(this).balance);
-        //block.timestamp changeed to 10 to check the test
-        emit Withdrawal(address(this).balance, 10);
+        for (uint i = 0; i < _amountToken.length; i++) {
+            require(
+                IERC20(_tokenAddress[i]).balanceOf(address(this)) >=
+                    _amountToken[i],
+                "Lock: Not enough funds for this token: "
+            );
+            // require(
+            //     _amountToken[i] <= ownerProfitToken[i],
+            //     "Too much token withdrawal"
+            // );
+           // ownerProfitToken[i] -= _amountToken[i];
+            IERC20(_tokenAddress[i]).transfer(msg.sender, _amountToken[i]);
+        }
+        if (_amountEth > 0) {
+            ownerProfitEth -= _amountEth;
+            payable(msg.sender).transfer(_amountEth);
+        }
+
+        emit Withdrawal(address(this).balance, block.timestamp);
     }
 
     receive() external payable {}

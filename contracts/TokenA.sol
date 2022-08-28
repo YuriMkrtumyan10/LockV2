@@ -10,5 +10,4 @@ contract TokenA is ERC20("TokenA", "TA") {
     function burn(address _from, uint256 _amount) public {
         _burn(_from, _amount);
     }
-
 }
